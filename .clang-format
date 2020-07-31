@@ -1,0 +1,17 @@
+﻿---
+BasedOnStyle: Google
+AccessModifierOffset: '0'
+AlignAfterOpenBracket: Align
+BinPackArguments: 'false'
+BinPackParameters: 'false'
+BreakConstructorInitializers: BeforeComma
+ConstructorInitializerAllOnOneLineOrOnePerLine: 'true'
+Cpp11BracedListStyle: 'true'
+ExperimentalAutoDetectBinPacking: 'true'
+IndentWidth: '3'
+Language: Cpp
+PointerAlignment: Left
+SpacesBeforeTrailingComments: '0'
+Standard: Auto
+TabWidth: '3'
+UseTab: Never
