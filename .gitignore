@@ -32,5 +32,6 @@
 *.app
 
 # Build Artifacts
-/build
-/build/*
+build/
+examples/build/
+

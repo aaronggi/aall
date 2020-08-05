@@ -1,0 +1,7 @@
+project(examples)
+find_package(cppzmq)
+add_subdirectory(/mnt/c/users/aaron/code/aall ./build)
+add_executable(consumer consumer.cpp)
+add_executable(producer producer.cpp)
+target_link_libraries(consumer logging cppzmq)
+target_link_libraries(producer logging cppzmq)

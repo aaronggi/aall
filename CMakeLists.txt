@@ -5,6 +5,7 @@ project(logging LANGUAGES CXX)
 message("${CMAKE_MODULE_PATH}")
 
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_IGNORE_PATH examples)
 set(BUILD_SHARED_LIBS FALSE)
 
 
