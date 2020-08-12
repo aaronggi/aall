@@ -34,4 +34,5 @@
 # Build Artifacts
 build/
 examples/build/
+external/*/build/
 

@@ -3,6 +3,7 @@
 
 #include <date/date.h>
 #include <stdlib.h>
+
 #include <array>
 #include <chrono>
 #include <ctime>
@@ -10,6 +11,8 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <type_traits>
 #include <vector>
 #include <zmq.hpp>
 
@@ -33,26 +36,50 @@
 
 namespace aall {
 #if defined(__cplusplus)
-#if __cplusplus >= 201703L
-#define AALL_CPP17
+#if __cplusplus >= 202003L
+#define AALL_CPPSTD 20
+using StringLIteral = std::string_view;
+#elif __cplusplus >= 201703L
+#define AALL_CPPSTD 17
 #define AALL_IF_CONSTEXPR if constexpr
-#define AALL_CONSTEXPR constexpr
+#define AALL_INLINE_VAR inline
 using StringLiteral = std::string_view;
 #elif __cplusplus >= 201402L
-#define AALL_CPP14
+#define AALL_CPPSTD 14
 #define AALL_IF_CONSTEXPR if
-#define AALL_CONSTEXPR constexpr
+#define AALL_INLINE_VAR
 using StringLiteral = const char*;
 #elif __cplusplus >= 201103L
-#define AALL_CPP11
+#define AALL_CPPSTD 11
 #define AALL_IF_CONSTEXPR if
-#define AALL_CONSTEXPR
+#define AALL_INLINE_VAR
 using StringLiteral = const char*;
 #else
 #error "C++11 or greater is required"
 #endif
 #endif
 }// namespace aall
+
+// USER DEFINITIONS BEGIN
+// Users SHOULD define at least progname, and AALL_DEFAULTS_SET if they want
+// to forego explicit initialization of the MsgProxy (C++>17 only)
+#ifndef AALL_PROGNAME
+#define AALL_PROGNAME "unnamed_proc"
+#endif
+
+#ifndef AALL_SERVERADDRLOCAL
+#define AALL_SERVERADDRLOCAL "tcp://127.0.0.1:51228"
+//"inproc://aalllocalserver"
+#endif
+
+#ifndef AALL_SERVERADDR_PUBLISH
+#define AALL_SERVERADDR_PUBLISH "tcp://127.0.0.1:51229"
+#endif
+
+#ifndef AALL_SERVER_TYPE
+#define AALL_SERVER_TYPE ::aall::Server::LOCAL
+#endif
+
 /** END MACROS**/
 
 namespace aall {
@@ -73,25 +100,26 @@ enum LogLevels { dbg, msg, wrn, err, ftl, max };
 
 namespace util {
 
-struct Messaging {
-   zmq::context_t zcontext{};
-   zmq::socket_t zsock{zcontext, zmq::socket_type::push};
-};
-// mainly used for the VRBS macro. will help with printing line/function/file
-// info
-struct Context {
-   int line = 0;
-   StringLiteral func = "";
-   StringLiteral file = "";
+template <typename T>
+constexpr inline aall::StringLiteral file_name(T const& path) {
+#if AALL_CPPSTD >= 17
+   T file = path;
+   auto i = 0L;
 
-#ifdef AALL_CPP11
-   Context(int l, StringLiteral f1, StringLiteral f2)
-       : line(l), func(f1), file(f2) {}
-   Context(Context&& other) = default;
-   Context(Context const& other) = default;
+   while (path.size() && i + 1 < path.size()) {
+      i++;
+      if (i > 1 && (path[i - 1] == '/' || path[i - 1] == '\\')) {
+         file = path.substr(i, path.size() - i);
+      }
+   }
+
+   return file;
+#else
+   return path;
 #endif
-};
+}
 
+// returns a string associated with the log level
 constexpr StringLiteral getLogLevelstring(LogLevels l) {
    switch (l) {
       case LogLevels::dbg:
@@ -110,136 +138,180 @@ constexpr StringLiteral getLogLevelstring(LogLevels l) {
    return "";
 }
 
-//[aaronggi]: these are currently just a bandaid to allow us to still
-// use these variables globally, even though this is a header-only file.
-inline Messaging& getMsgr() {
-   static Messaging msg{};
-   return msg;
-}
+// mainly used for the VRBS macro. will help with printing line/function/file
+// info
+struct Context {
+   int line = 0;
+   StringLiteral func = "";
+   StringLiteral file = "";
 
-inline std::mutex& getMtx() {
-   static std::mutex mutex;
-   return mutex;
-}
+   constexpr Context(int l, StringLiteral const& f1, StringLiteral const& f2)
+       : line(l), func(f1), file(util::file_name(f2)) {}
+   constexpr Context() : Context(0, "", "") {}
 
-inline std::string& getProgname() {
-   static std::string prgname;
-   return prgname;
-}
-}// namespace util
-
-template <typename Serializer, typename Sender, typename StringType>
-struct Logger {
-   using string_type = StringType;
-   using serializer_type = Serializer;
-   using sender_type = Sender;
-
-   static Logger defaultLogger{};
-
-   string_type threadID{};
-   serializer_type serializer{};
-   sender_type sender{};
-
-   Logger(string_type thread_id)
-       : Logger{std::move(thread_id), serializer_type{}, sender_type{}} {}
-
-   Logger(string_type&& thread_id,
-          serializer_type&& srlizer,
-          sender_type&& sndr)
-       : threadID{threadID}
-       , serializer{std::move(srlizer)}
-       , sender{std::move(sndr)} {}
-
-   Logger(Logger&& logger) = default;
-
-   Logger& operator=(Logger&& rhs) = default;
-
-
+   constexpr Context(Context&& other) = default;
+   constexpr Context(Context const& other) = default;
 };
 
+}// namespace util
+
+#if AALL_CPPSTD >= 17
+static inline zmq::context_t zmqContext{1};
+#else
+extern zmq::context_t zmqContext;
+#endif
+
+struct Server {
+   enum Type { LOCAL, EXTERNAL, TYPE_MAX };
+   std::thread proxythread{};
+   zmq::socket_t zmqSubSocket{aall::zmqContext, ZMQ_XSUB};
+   zmq::socket_t zmqPubSocket{aall::zmqContext, ZMQ_XPUB};
+   zmq::socket_ref captureSock{};
+
+   bool relay = false;
+
+   Server(Type servertype = AALL_SERVER_TYPE,
+          const char* svraddrlocal = AALL_SERVERADDRLOCAL,
+          const char* svraddrPublish = AALL_SERVERADDR_PUBLISH,
+          zmq::socket_ref capture = zmq::socket_ref())
+       : captureSock(capture), relay(servertype == EXTERNAL ? true : false) {
+      std::cout << "server1\n";
+
+      std::cout << "server2\n";
+      zmqSubSocket.bind(svraddrlocal);
+      // zmqSubSocket.setsockopt(ZMQ_SUBSCRIBE, "", 0);
+
+      std::cout << "server3\n";
+
+      std::cout << "server4\n";
+      if (relay == false) {
+         zmqPubSocket.bind(svraddrPublish);
+         std::cout << "relay";
+      }
+
+      else {
+         zmqPubSocket.connect(svraddrPublish);
+         std::cout << "NOT RELAY";
+      }
+
+      std::cout << "server5\n";
+
+      proxythread = std::thread(
+          [this] { zmq::proxy(zmqPubSocket, zmqSubSocket, captureSock); });
+
+      std::cout << "server6\n";
+   }
+
+   Server(Server&&) = default;
+   Server& operator=(Server&&) = default;
+
+   ~Server() {
+      zmqPubSocket.close();
+      zmqSubSocket.close();
+      zmqContext.close();
+      proxythread.join();
+   }
+};
+
+struct Sender {
+   zmq::socket_t zmqSocket{zmqContext, zmq::socket_type::pub};
+   std::string threadID;
+
+   public:
+   Sender(const char* threadid = "main", const char* dmn = AALL_SERVERADDRLOCAL)
+       : threadID(threadid) {
+      zmqSocket.connect(dmn);
+   }
+
+   Sender(Sender&&) = default;
+   Sender& operator=(Sender&&) = default;
+
+   template <typename T>
+   friend void setThreadID(T&& id);
+};
+
+#if AALL_CPPSTD >= 17
+static inline Server server{};
+#endif
+extern std::string_view progname;
+extern thread_local aall::Sender threadlogger;
+
+// extern LoggerClass server;
+// extern thread_local aall::Sender threadlogger;
+
+// NOTE: this is highly recommended (for C++17 or greater)
+
+// Recommend Call this at the beginning of the thread
+template <typename T>
+inline void setThreadID(T&& id) {
+   aall::threadlogger.threadID = std::forward<T>(id);
+}
+
+static void setProgname(std::string_view progName) {
+   std::swap(aall::progname, progName);
+}
+
 namespace logging {
-   /**
-    * NAME: Log
-    * DESCRIPTION: Main logging function
-    * PARAMS:
-    * msg -- the message to send
-    * Tags -- the Tags to categorize your message
-    * Context -- data regarding where/when the function is called
-    * RETURNS:
-    * nothing.
-    */
-   template <LogLevels lvl = LogLevels::msg,
-             bool timeEnabled = TIME_ENABLED,
-             bool sendMsgs = MESSAGES_ENABLED>
-   void log(std::string const& msg,
-            Tags t = Tags{},
-            util::Context && c = util::Context{},
-            util::Messaging * sender = &util::getMsgr()) {
-      using namespace date;
+/**
+ * NAME: Log
+ * DESCRIPTION: Main logging function
+ * PARAMS:
+ * msg -- the message to send
+ * Tags -- the Tags to categorize your message
+ * Context -- data regarding where/when the function is called
+ * RETURNS:
+ * nothing.
+ */
+template <LogLevels lvl = LogLevels::msg,
+          bool timeEnabled = TIME_ENABLED,
+          bool sendMsgs = MESSAGES_ENABLED,
+          typename T = std::string>
+void log_(T&& msg, Tags t = Tags{}, util::Context&& c = util::Context{}) {
+   using namespace date;
 
-      auto& progname = util::getProgname();
-      auto numTags = t.size();
-      auto& mtx = util::getMtx();
+   auto& progname = aall::progname;
+   auto& threadID = aall::threadlogger.threadID;
+   auto numTags = t.size();
 
-      std::string datestr;
-      std::string tagstr;
+   std::string datestr;
+   std::string tagstr;
 
-      AALL_IF_CONSTEXPR(timeEnabled) {
-         std::ostringstream sstream;
-         sstream << '[' << std::chrono::system_clock::now() << ']';
-         datestr = sstream.str();
-      }
+   AALL_IF_CONSTEXPR(timeEnabled) {
+      datestr = date::format("[%F %T]", std::chrono::system_clock::now());
+   }
 
-      if (numTags > 0) {
-         for (auto const& str : t) {
-            tagstr += str;
-            tagstr += ",";
-         }
-      }
+   if (numTags > 0) {
+      auto iter = t.begin();
 
-      auto fmtmsg = fmt::format("[{}] (({})) {}:{}:{} <Tags: {}> [{}]: {} \n",
-                                datestr,
-                                progname,
-                                c.file,
-                                c.func,
-                                c.line ? c.line : 0,
-                                tagstr,
-                                util::getLogLevelstring(lvl),
-                                msg);
+      fmt::format_to(
+          std::back_insert_iterator{tagstr}, FMT_STRING("#{}"), *iter);
+      iter++;
 
-      std::cout << fmtmsg;
-
-      {
-         std::lock_guard<std::mutex> lg{mtx};
-         sender->zsock.send(zmq::buffer(fmtmsg), zmq::send_flags::dontwait);
+      for (; iter < t.end(); iter++) {
+         fmt::format_to(
+             std::back_insert_iterator{tagstr}, FMT_STRING(", #{}"), *iter);
       }
    }
 
-   /**
-    * NAME: Initialize
-    * DESCRIPTION: bootstrapping function, mainly sets the program name for
-    * logging PARAMS:
-    *  - argv: the program arguments
-    * RETURNS:
-    *  nothing
-    */
-   void initialize(
-       const char* prgname, const char* addr, const bool sendMsgs = true) {
-      auto& progname = util::getProgname();
-      auto& messaging = util::getMsgr();
+   auto fmtmsg =
+       fmt::format(FMT_STRING("{} (({})) <<{}>> {}:{}:{} <{}> [{}]: {} \n"),
+                   datestr,
+                   progname,
+                   threadID,
+                   c.file,
+                   c.func,
+                   c.line ? c.line : 0,
+                   tagstr,
+                   util::getLogLevelstring(lvl),
+                   std::forward<T>(msg));
 
-      progname = std::string(prgname);
+   fmt::print(fmtmsg);
 
-      auto slash = progname.find_last_of("/\\");
-
-      if (slash != std::string::npos) {
-         progname = progname.substr(slash + 1);
-      }
-
-      if (sendMsgs) {
-         messaging.zsock.bind(addr);
-      }
-   }
+   aall::threadlogger.zmqSocket.send(zmq::buffer(progname),
+                                     zmq::send_flags::sndmore);
+   aall::threadlogger.zmqSocket.send(zmq::buffer(fmtmsg),
+                                     zmq::send_flags::dontwait);
+}
 
 }// namespace logging
 }// namespace aall
