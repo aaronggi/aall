@@ -18,8 +18,6 @@
 
 #define FMT_HEADER_ONLY 1
 #include <fmt/chrono.h>
-#include <fmt/core.h>
-#include <fmt/format-inl.h>
 #include <fmt/format.h>
 #include <fmt/printf.h>
 #undef FMT_HEADER_ONLY
@@ -63,6 +61,11 @@ using StringLiteral = const char*;
 // USER DEFINITIONS BEGIN
 // Users SHOULD define at least progname, and AALL_DEFAULTS_SET if they want
 // to forego explicit initialization of the MsgProxy (C++>17 only)
+
+#ifndef AALL_BROADCAST_SKT
+#define AALL_BROADCAST_SKT "tcp://127.0.0.1:51227"
+#endif
+
 #ifndef AALL_PROGNAME
 #define AALL_PROGNAME "unnamed_proc"
 #endif
@@ -160,56 +163,71 @@ static inline zmq::context_t zmqContext{1};
 #else
 extern zmq::context_t zmqContext;
 #endif
+extern std::string_view progname;
+
 
 struct Server {
+
    enum Type { LOCAL, EXTERNAL, TYPE_MAX };
+
    std::thread proxythread{};
-   zmq::socket_t zmqSubSocket{aall::zmqContext, ZMQ_XSUB};
-   zmq::socket_t zmqPubSocket{aall::zmqContext, ZMQ_XPUB};
+   std::thread broadcastThread{};
+   zmq::socket_t zmqSubSocket{aall::zmqContext, zmq::socket_type::xsub};
+   zmq::socket_t zmqPubSocket{aall::zmqContext, zmq::socket_type::xpub};
+   zmq::socket_t serviceBroadcaster{aall::zmqContext, zmq::socket_type::pub};
    zmq::socket_ref captureSock{};
-
-   bool relay = false;
-
-   Server(Type servertype = AALL_SERVER_TYPE,
-          const char* svraddrlocal = AALL_SERVERADDRLOCAL,
+   bool broadcasting = false; //TODO: make this thread safe, std::atomic is not 
+                              //      movable by default
+   std::string publishAddr;
+   
+   Server(const char* svraddrlocal = AALL_SERVERADDRLOCAL,
           const char* svraddrPublish = AALL_SERVERADDR_PUBLISH,
-          zmq::socket_ref capture = zmq::socket_ref())
-       : captureSock(capture), relay(servertype == EXTERNAL ? true : false) {
-      std::cout << "server1\n";
-
-      std::cout << "server2\n";
+          zmq::socket_ref captureSkt = zmq::socket_ref(),
+          bool broadcast = true)
+       : captureSock(captureSkt)
+       , broadcasting(broadcast)
+       , publishAddr(svraddrPublish){
+      
+      using namespace std::chrono_literals;
+      
       zmqSubSocket.bind(svraddrlocal);
-      // zmqSubSocket.setsockopt(ZMQ_SUBSCRIBE, "", 0);
-
-      std::cout << "server3\n";
-
-      std::cout << "server4\n";
-      if (relay == false) {
-         zmqPubSocket.bind(svraddrPublish);
-         std::cout << "relay";
-      }
-
-      else {
-         zmqPubSocket.connect(svraddrPublish);
-         std::cout << "NOT RELAY";
-      }
-
-      std::cout << "server5\n";
-
+      zmqPubSocket.bind(svraddrPublish);
+      
       proxythread = std::thread(
           [this] { zmq::proxy(zmqPubSocket, zmqSubSocket, captureSock); });
 
-      std::cout << "server6\n";
+      if(broadcasting){
+         serviceBroadcaster.setsockopt(ZMQ_SNDHWM, 1);
+         serviceBroadcaster.connect(AALL_BROADCAST_SKT);
+
+         broadcastThread = std::thread(
+            [this] {
+               while(broadcasting){
+                  fmt::print("broadcasting");
+                  serviceBroadcaster.send(zmq::buffer("AALL_CHANNEL"), 
+                                          zmq::send_flags::sndmore);
+                  serviceBroadcaster.send(zmq::buffer(aall::progname),
+                                         zmq::send_flags::sndmore);
+                  serviceBroadcaster.send(zmq::buffer(publishAddr));
+                  std::this_thread::sleep_for(500ms);
+               }
+               return;
+            });
+      }
    }
 
    Server(Server&&) = default;
    Server& operator=(Server&&) = default;
 
    ~Server() {
+      broadcasting = true;
+      broadcastThread.join();
+      serviceBroadcaster.close();
       zmqPubSocket.close();
       zmqSubSocket.close();
       zmqContext.close();
-      proxythread.join();
+      proxythread.join(); //proxy automatically closes with context
+      
    }
 };
 
@@ -233,7 +251,6 @@ struct Sender {
 #if AALL_CPPSTD >= 17
 static inline Server server{};
 #endif
-extern std::string_view progname;
 extern thread_local aall::Sender threadlogger;
 
 // extern LoggerClass server;
@@ -309,6 +326,11 @@ void log_(T&& msg, Tags t = Tags{}, util::Context&& c = util::Context{}) {
 
    aall::threadlogger.zmqSocket.send(zmq::buffer(progname),
                                      zmq::send_flags::sndmore);
+
+   for(auto& tag : t){
+      aall::threadlogger.zmqSocket.send(zmq::buffer(tag), zmq::send_flags::sndmore);
+   }
+   aall::threadlogger.zmqSocket.send(zmq::message_t{}, zmq::send_flags::sndmore);
    aall::threadlogger.zmqSocket.send(zmq::buffer(fmtmsg),
                                      zmq::send_flags::dontwait);
 }

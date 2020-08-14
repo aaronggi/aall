@@ -25,7 +25,8 @@ int main(int argc, const char *argv[]) {
 
       auto yy = aall::StringLiteral(xx, argc + 1);
       //log("hello_world", Tags{"test1", "test2"}, VRBS);
-      log_<LogLevels::err>("hello_world", Tags{"test3", "test4", xx}, VRBS);
+      log_<LogLevels::err>("hello_world1", Tags{"test1", "test2"}, VRBS);
+      log_<LogLevels::err>("hello_world2", Tags{"test3", "test4"}, VRBS);
 
       usleep(100000);
    }
