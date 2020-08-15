@@ -3,6 +3,7 @@
 
 std::string_view aall::progname{"PRODUCER"};
 thread_local aall::Sender aall::threadlogger{};
+aall::Server aall::server{};
 
 int main(int argc, const char *argv[]) {
    aall::setThreadID("main");
@@ -10,7 +11,7 @@ int main(int argc, const char *argv[]) {
    using aall::Tags;
    using aall::logging::log_;
 
-   //aall::logging::initialize(argv[0], "tcp://127.0.0.1:37837");
+   
    std::thread t([]{
       aall::setThreadID("thread2");
       while(1){

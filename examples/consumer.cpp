@@ -3,11 +3,21 @@
 //#include <aall/log.hpp>
 #include <zmq.hpp>
 #include <fmt/format.h>
+#include <fmt/printf.h>
 #include <unordered_set>
 #include <unordered_map>
 #include <thread>
 
 //The best kind of debug
+#if defined(__GNUC__) || defined(__clang__)
+#define aall_likely(x)       __builtin_expect((x),1)
+#define aall_unlikely(x)     __builtin_expect((x),0)
+#else
+#define aall_likely(x)       x
+#define aall_unlikely(x)     x
+#endif
+
+//the best kind of debugging
 #define ___l //fmt::print("{}\n", __LINE__);
 
 
@@ -23,13 +33,14 @@ zmq::socket_t logRxMsgSkt{zcontext, zmq::socket_type::sub};
 
 bool running = false;
 
-
+//also ignore this; WIP
 void staticInit(int argc, char* argv[]){
    services.reserve(32);
 
    serviceSubSkt.set(zmq::sockopt::subscribe, "AALL_CHANNEL");
    serviceSubSkt.bind("tcp://127.0.0.1:51227");
 
+   //subscribe all if none specified or wildcard
    if(argc == 1 || std::string{argv[1]} == "*"){
       logRxMsgSkt.set(zmq::sockopt::subscribe, "");
    }
@@ -39,6 +50,7 @@ void staticInit(int argc, char* argv[]){
 
    running = true;
 
+   //service discovery thread
    serviceDiscovery = std::thread([]{
       zmq::message_t msg{};
       fmt::print("looking for services \n");
@@ -104,7 +116,12 @@ int main(int argc, char* argv[]) {
       //an empty msg acts as a delimiter for the end of tags
       //we loop until the message size is 0, while adding the 
       //message tags to the loop
-      while(auto msgResult = logRxMsgSkt.recv(msg)){
+      while(true){
+         auto msgResult = logRxMsgSkt.recv(msg);
+         if (aall_unlikely(msgResult.has_value() == false)){
+            //TODO: obv better error reporting/handling
+            throw std::logic_error("whoops"); 
+         }
          if (msg.size() == 0) 
             break;
          auto rxTag = msg.to_string();

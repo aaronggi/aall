@@ -25,6 +25,7 @@
 #include <unistd.h>
 
 /** MACROS **/
+#define ___l //fmt::print("{}\n", __LINE__);
 
 #define AALL_VERBOSE \
    ::aall::util::Context { __LINE__, __func__, __FILE__ }
@@ -159,14 +160,20 @@ struct Context {
 }// namespace util
 
 #if AALL_CPPSTD >= 17
-static inline zmq::context_t zmqContext{1};
+inline zmq::context_t zmqContext{1};
 #else
 extern zmq::context_t zmqContext;
 #endif
-extern std::string_view progname;
 
+extern aall::StringLiteral progname;
 
-struct Server {
+//Server
+//      basically forwards all messages
+//      to subscribers, and broadcasts the service
+//      (service name/ tcp listening port) to
+//      the CLI/whoever is listening
+//The big boy
+class Server {
 
    enum Type { LOCAL, EXTERNAL, TYPE_MAX };
 
@@ -179,7 +186,9 @@ struct Server {
    bool broadcasting = false; //TODO: make this thread safe, std::atomic is not 
                               //      movable by default
    std::string publishAddr;
-   
+
+public:
+
    Server(const char* svraddrlocal = AALL_SERVERADDRLOCAL,
           const char* svraddrPublish = AALL_SERVERADDR_PUBLISH,
           zmq::socket_ref captureSkt = zmq::socket_ref(),
@@ -193,13 +202,17 @@ struct Server {
       zmqSubSocket.bind(svraddrlocal);
       zmqPubSocket.bind(svraddrPublish);
       
+      //forwards messages+subscriptions thru xpub/xsub
       proxythread = std::thread(
           [this] { zmq::proxy(zmqPubSocket, zmqSubSocket, captureSock); });
 
+      //we can, like, not tell potential listeners we exist
       if(broadcasting){
-         serviceBroadcaster.setsockopt(ZMQ_SNDHWM, 1);
+         serviceBroadcaster.set(zmq::sockopt::sndhwm, 1);
+         //TODO: make this configurable? maybe?
          serviceBroadcaster.connect(AALL_BROADCAST_SKT);
 
+         //broadcast progname/tcp addr to the listener (CLI prob)
          broadcastThread = std::thread(
             [this] {
                while(broadcasting){
@@ -231,11 +244,13 @@ struct Server {
    }
 };
 
+//TODO: Add description
 struct Sender {
    zmq::socket_t zmqSocket{zmqContext, zmq::socket_type::pub};
    std::string threadID;
 
    public:
+
    Sender(const char* threadid = "main", const char* dmn = AALL_SERVERADDRLOCAL)
        : threadID(threadid) {
       zmqSocket.connect(dmn);
@@ -248,15 +263,10 @@ struct Sender {
    friend void setThreadID(T&& id);
 };
 
-#if AALL_CPPSTD >= 17
-static inline Server server{};
-#endif
+//VARIABLES
+//do I want to keep these global-ish?
+extern Server server;
 extern thread_local aall::Sender threadlogger;
-
-// extern LoggerClass server;
-// extern thread_local aall::Sender threadlogger;
-
-// NOTE: this is highly recommended (for C++17 or greater)
 
 // Recommend Call this at the beginning of the thread
 template <typename T>
@@ -297,19 +307,23 @@ void log_(T&& msg, Tags t = Tags{}, util::Context&& c = util::Context{}) {
       datestr = date::format("[%F %T]", std::chrono::system_clock::now());
    }
 
+   //Create a string like "#tag1, #tag2, #tag3..."
    if (numTags > 0) {
       auto iter = t.begin();
 
+      //add first tag to our tag string
       fmt::format_to(
           std::back_insert_iterator{tagstr}, FMT_STRING("#{}"), *iter);
       iter++;
 
+      //add the rest
       for (; iter < t.end(); iter++) {
          fmt::format_to(
              std::back_insert_iterator{tagstr}, FMT_STRING(", #{}"), *iter);
       }
    }
 
+   //create our format string
    auto fmtmsg =
        fmt::format(FMT_STRING("{} (({})) <<{}>> {}:{}:{} <{}> [{}]: {} \n"),
                    datestr,
@@ -322,15 +336,20 @@ void log_(T&& msg, Tags t = Tags{}, util::Context&& c = util::Context{}) {
                    util::getLogLevelstring(lvl),
                    std::forward<T>(msg));
 
+   //print our log string ((TODO: make this optional))
    fmt::print(fmtmsg);
 
+   //Send our program name
    aall::threadlogger.zmqSocket.send(zmq::buffer(progname),
                                      zmq::send_flags::sndmore);
 
+   //send our tags
    for(auto& tag : t){
       aall::threadlogger.zmqSocket.send(zmq::buffer(tag), zmq::send_flags::sndmore);
    }
+   //send our tag-delimeter
    aall::threadlogger.zmqSocket.send(zmq::message_t{}, zmq::send_flags::sndmore);
+   //send the rest of our messge ((WORK IN PROGRESS))
    aall::threadlogger.zmqSocket.send(zmq::buffer(fmtmsg),
                                      zmq::send_flags::dontwait);
 }
